@@ -91,6 +91,8 @@ button{font-family:inherit;color:inherit}
 .tile.c1{background-color:#FFE1E6}.tile.c2{background-color:#FFF1C9}.tile.c3{background-color:#DDF4FF}.tile.c4{background-color:#DFF8EC}.tile.c5{background-color:#EDE4FF}.tile.c6{background-color:#FFE9D6}
 .tile .badge{position:absolute;top:10px;right:14px;background:var(--coral);color:#fff;font-size:.9rem;border-radius:999px;padding:2px 10px}
 .mute{position:absolute;top:12px;right:16px;width:52px;height:52px;font-size:1.4rem;z-index:2}
+.bgm-btn{right:78px}
+.bgm-btn.off{opacity:.45;filter:grayscale(1)}
 
 .stickers{max-width:560px;margin:18px auto 0;background:var(--card);border-radius:var(--radius);padding:14px 16px;box-shadow:var(--shadow);position:relative}
 .stickers.all{background:linear-gradient(#fff,#fff) padding-box,linear-gradient(90deg,#FF7A8A,#FFD166,#4FD1A5,#6EC6FF,#B49BFF) border-box;border:4px solid transparent}
@@ -270,6 +272,7 @@ button{font-family:inherit;color:inherit}
   <!-- 메뉴 -->
   <section class="screen hub" id="s-hub">
     <button class="icon-btn mute" id="mute" aria-label="소리 켜기/끄기">🔊</button>
+    <button class="icon-btn mute bgm-btn" id="bgm" aria-label="배경음악 켜기/끄기">🎵</button>
     <span class="twinkle" style="left:8%;top:6%">✦</span>
     <span class="twinkle" style="left:22%;top:16%;animation-delay:.8s;font-size:.8rem">✦</span>
     <span class="twinkle" style="right:12%;top:20%;animation-delay:1.4s">✦</span>
@@ -569,6 +572,7 @@ const Voice = (() => {
       s.start(c.currentTime + Math.max(0, want - performance.now()) / 1000);
       s.onended = () => { if (cur === s) cur = null; };
       cur = s;
+      Bgm.duck(buf.duration + Math.max(0, want - performance.now()) / 1000);   // 말하는 동안 음악을 줄임
     }).catch(() => {});
     try { if ('speechSynthesis' in window) speechSynthesis.cancel(); } catch (e) {}
     return true;
@@ -577,6 +581,57 @@ const Voice = (() => {
 })();
 // 목소리 파일이 있으면 그걸로, 없으면 기기 음성으로
 function talk(key, text) { if (!Voice.play(key)) say(text); }
+
+/* ===== 배경음악 (Suno, sounds/bgm — tools/make-bgm.mjs) =====
+   화면마다 곡 종류를 정하고, 한 곡이 끝나면 같은 종류의 다른 곡으로 번갈아 튼다.
+   같은 종류 화면끼리 옮겨 다니면 끊지 않고 이어서. 실로폰은 아이가 치는 소리와 섞이지 않게 끈다.
+   <audio> 를 Web Audio 에 연결해 크기를 조절한다(iPad 는 audio.volume 을 무시함). */
+const Bgm = (() => {
+  const SETS = { menu: ['menu1', 'menu2'], calm: ['calm1', 'calm2'], fun: ['fun1', 'fun2'] };
+  const USE = { hub: 'menu', gallery: 'menu', colorpick: 'calm', color: 'calm', dress: 'calm', scene: 'calm', memory: 'fun', count: 'fun', dots: 'fun', balloon: 'fun' };
+  const VOL = 1, DUCK = .35;   // 목소리가 나오는 동안은 35%로
+  let on = store.get('bgm', true), set = null, el = null, gain = null, duckT = 0, fadeT = 0;
+  const next = {};             // 종류마다 다음에 틀 곡 번호
+  function init() {
+    if (el) return true;
+    const c = Snd.ctx(); if (!c) return false;
+    try {
+      el = new Audio(); el.preload = 'auto';
+      el.addEventListener('ended', () => { if (set) load(set); });   // 끝나면 같은 종류의 다른 곡
+      gain = c.createGain(); gain.gain.value = 0;
+      c.createMediaElementSource(el).connect(gain).connect(c.destination);
+      return true;
+    } catch (e) { el = null; return false; }
+  }
+  function load(s) {
+    const list = SETS[s], i = next[s] || 0;
+    next[s] = (i + 1) % list.length;
+    el.src = 'sounds/bgm/' + list[i] + '.mp3';
+    el.play().catch(() => {});
+  }
+  function ramp(v, t = .5) { const c = Snd.ctx(); if (c && gain) { gain.gain.cancelScheduledValues(c.currentTime); gain.gain.setTargetAtTime(v, c.currentTime, t / 3); } }
+  // 지금 화면에 맞춰 틀거나 끈다
+  function sync() {
+    const want = (on && !Snd.muted && !document.hidden) ? (USE[current] || null) : null;
+    if (!want) { if (el && set) { ramp(0, .4); clearTimeout(fadeT); fadeT = setTimeout(() => { if (el) el.pause(); }, 450); } set = null; return; }
+    if (!init()) return;
+    clearTimeout(fadeT);
+    if (want === set) { if (el.paused) el.play().catch(() => {}); ramp(VOL); return; }
+    const first = !set; set = want;
+    if (first || el.paused) { load(want); ramp(VOL, 1.2); return; }
+    ramp(0, .4); fadeT = setTimeout(() => { load(want); ramp(VOL, 1.2); }, 450);   // 종류가 바뀌면 살짝 줄였다가 새 곡
+  }
+  function duck(sec) {
+    if (!set || !gain) return;
+    ramp(DUCK, .15); clearTimeout(duckT);
+    duckT = setTimeout(() => { if (set) ramp(VOL, .8); }, sec * 1000 + 150);
+  }
+  function toggle() { on = !on; store.set('bgm', on); sync(); return on; }
+  // 브라우저는 첫 터치 전에는 음악을 못 틀게 해서, 처음 화면에서는 첫 터치 때 시작
+  document.addEventListener('pointerup', () => { if (!set) sync(); }, { passive: true });
+  document.addEventListener('visibilitychange', sync);
+  return { sync, duck, toggle, get on() { return on; } };
+})();
 
 /* ===== 화면 전환 ===== */
 const games = {};
@@ -588,13 +643,18 @@ function show(id) {
   Voice.stop();
   if (games[id] && games[id].start) games[id].start();
   Voice.play('intro.' + id);   // 게임마다 들어갈 때 한마디(없는 게임은 조용히 넘어감)
+  Bgm.sync();
 }
 $$('[data-game]').forEach(b => b.addEventListener('click', () => { Snd.tick(); show(b.dataset.game); }));
 $$('.home').forEach(b => b.addEventListener('click', () => { Snd.tick(); show('hub'); }));
 
 const muteBtn = $('#mute');
 function paintMute() { muteBtn.textContent = Snd.muted ? '🔇' : '🔊'; }
-muteBtn.addEventListener('click', () => { const m = Snd.toggle(); paintMute(); if (!m) Snd.ding(); });
+muteBtn.addEventListener('click', () => { const m = Snd.toggle(); paintMute(); if (!m) Snd.ding(); Bgm.sync(); });
+const bgmBtn = $('#bgm');
+function paintBgm() { bgmBtn.classList.toggle('off', !Bgm.on); bgmBtn.setAttribute('aria-pressed', String(Bgm.on)); }
+bgmBtn.addEventListener('click', () => { Bgm.toggle(); paintBgm(); Snd.tick(); });
+paintBgm();
 paintMute();
 
 /* ===== 스티커 ===== */
