@@ -528,6 +528,56 @@ function say(text) {
 }
 try { if ('speechSynthesis' in window) speechSynthesis.getVoices(); } catch (e) {}
 
+/* ===== 안내 목소리 (수아 — Typecast로 미리 만든 파일, tools/voice-lines.json) =====
+   Voice.play(키) : 그 키의 문장 중 하나를 무작위로(바로 앞과 다른 것) 재생. 파일이 있으면 true.
+   파일·목록을 못 불러왔으면 false → 부르는 쪽에서 기기 음성(say)이나 합성음으로 대신한다. */
+const Voice = (() => {
+  const BASE = 'sounds/voice/';
+  let man = null, cur = null, pre = false;
+  const raw = new Map(), dec = new Map(), last = {};
+  fetch(BASE + 'manifest.json').then(r => r.ok ? r.json() : null).then(m => { man = m; }).catch(() => {});
+  function load(f) {
+    if (!raw.has(f)) raw.set(f, fetch(BASE + f).then(r => { if (!r.ok) throw new Error(f); return r.arrayBuffer(); }));
+    return raw.get(f);
+  }
+  // 첫 터치 뒤에 전부 미리 받아 둔다(약 1.2MB) → 누르자마자 소리가 나게
+  function preload() { if (pre || !man) return; pre = true; Object.values(man).forEach(l => l.forEach(([f]) => load(f).catch(() => {}))); }
+  document.addEventListener('pointerdown', preload, { passive: true });
+  function decode(c, f) {
+    if (dec.has(f)) return dec.get(f);
+    const p = load(f).then(b => new Promise((ok, no) => c.decodeAudioData(b.slice(0), ok, no)));
+    p.catch(() => dec.delete(f));
+    dec.set(f, p);
+    if (dec.size > 40) dec.delete(dec.keys().next().value);   // 풀어 둔 소리는 최근 40개만 기억
+    return p;
+  }
+  function stop() { if (cur) { try { cur.stop(); } catch (e) {} cur = null; } }
+  function play(key, delay = 0) {
+    if (Snd.muted) return true;
+    const list = man && man[key];
+    if (!list || !list.length) return false;
+    preload();
+    let i = rnd(list.length);
+    if (list.length > 1 && i === last[key]) i = (i + 1) % list.length;
+    last[key] = i;
+    const c = Snd.ctx(); if (!c) return false;
+    const want = performance.now() + delay;
+    decode(c, list[i][0]).then(buf => {
+      if (Snd.muted) return;
+      stop();
+      const s = c.createBufferSource(); s.buffer = buf; s.connect(c.destination);
+      s.start(c.currentTime + Math.max(0, want - performance.now()) / 1000);
+      s.onended = () => { if (cur === s) cur = null; };
+      cur = s;
+    }).catch(() => {});
+    try { if ('speechSynthesis' in window) speechSynthesis.cancel(); } catch (e) {}
+    return true;
+  }
+  return { play, stop };
+})();
+// 목소리 파일이 있으면 그걸로, 없으면 기기 음성으로
+function talk(key, text) { if (!Voice.play(key)) say(text); }
+
 /* ===== 화면 전환 ===== */
 const games = {};
 let current = 'hub';
@@ -535,7 +585,9 @@ function show(id) {
   if (games[current] && games[current].stop) games[current].stop();
   $$('.screen').forEach(s => { s.hidden = (s.id !== 's-' + id); });
   current = id;
+  Voice.stop();
   if (games[id] && games[id].start) games[id].start();
+  Voice.play('intro.' + id);   // 게임마다 들어갈 때 한마디(없는 게임은 조용히 넘어감)
 }
 $$('[data-game]').forEach(b => b.addEventListener('click', () => { Snd.tick(); show(b.dataset.game); }));
 $$('.home').forEach(b => b.addEventListener('click', () => { Snd.tick(); show('hub'); }));
@@ -583,7 +635,7 @@ function celebrate(game, msg, preview) {
   starT.forEach(clearTimeout); starT = [];
   $$('#ov-stars span').forEach((s, i) => { s.classList.remove('lit'); starT.push(setTimeout(() => { s.classList.add('lit'); Snd.star(i); }, 500 + i * 380)); });
   $('#overlay').hidden = false;
-  say('참 잘했어요! 스티커를 받았어요');
+  if (!Voice.play('cheer', 700)) say('참 잘했어요! 스티커를 받았어요');   // 팡파르가 먼저 울리고 나서
 }
 $('#ov-again').addEventListener('click', () => { $('#overlay').hidden = true; Snd.tick(); if (games[current] && games[current].start) games[current].start(); });
 $('#ov-home').addEventListener('click', () => { $('#overlay').hidden = true; Snd.tick(); show('hub'); });
@@ -656,11 +708,11 @@ games.memory = (() => {
     if (a.dataset.e === c.dataset.e) {
       setTimeout(() => {
         a.classList.add('done'); c.classList.add('done'); lock = false; found++;
-        meta.textContent = `🐾 ${found}/${total}`; Snd.ding();
+        meta.textContent = `🐾 ${found}/${total}`; if (!Voice.play('memory.ok')) Snd.ding();
         if (found === total) setTimeout(() => celebrate('memory', '동물 친구들을 다 찾았어요!'), 500);
       }, 350);
     } else {
-      setTimeout(() => { a.classList.remove('open'); c.classList.remove('open'); lock = false; Snd.buzz(); }, 900);
+      setTimeout(() => { a.classList.remove('open'); c.classList.remove('open'); lock = false; Snd.buzz(); if (Math.random() < .5) Voice.play('memory.no'); }, 900);
     }
   }
   $('#mem-again').addEventListener('click', () => { Snd.tick(); start(); });
@@ -1005,7 +1057,7 @@ games.color = (() => {
   $('#color-clear').addEventListener('click', () => { Snd.tick(); $$('.fill', stage).forEach(x => x.setAttribute('fill', '#fff')); });
   $('#color-pick').addEventListener('click', () => { Snd.tick(); show('colorpick'); });
   $('#color-done').addEventListener('click', () => {
-    if (painted() < 3) { Snd.buzz(); toast('조금만 더 색칠해 볼까? 🖍️'); return; }
+    if (painted() < 3) { Snd.buzz(); toast('조금만 더 색칠해 볼까? 🖍️'); Voice.play('color.more'); return; }
     const svg = stage.innerHTML;
     if (editing) Works.update(editing, { svg, t2: Date.now() }); else Works.add({ id: curId, n: curName, kind: 'color', svg, t: Date.now() });
     celebrate('color', `「${curName}」 그림을 멋지게 완성했어요! 내 그림에 저장했어요.`, svg + '<small>내가 색칠한 그림</small>');
@@ -1087,7 +1139,8 @@ games.balloon = (() => {
 
 /* ===== 게임 4 · 숫자 세기 ===== */
 games.count = (() => {
-  const ITEMS = [['🍎', '사과'], ['🍓', '딸기'], ['🐥', '병아리'], ['🌸', '꽃'], ['⭐', '별'], ['🦋', '나비'], ['🍪', '쿠키'], ['🎈', '풍선'], ['🐟', '물고기'], ['🍭', '사탕']];
+  const ITEMS = [['🍎', '사과'], ['🍓', '딸기'], ['🐥', '병아리', '마리'], ['🌸', '꽃'], ['⭐', '별'], ['🦋', '나비', '마리'], ['🍪', '쿠키'], ['🎈', '풍선'], ['🐟', '물고기', '마리'], ['🍭', '사탕']];
+  let qKey = '';
   const ROUNDS = 5;
   const box = $('#items'), q = $('#count-q'), ans = $('#answers'), dots = $('#count-dots');
   let round = 0, n = 0, tapped = [], busy = false;
@@ -1097,10 +1150,11 @@ games.count = (() => {
   }
   function next() {
     busy = false; tapped = [];
-    const [emo, name] = pick(ITEMS);
+    const [emo, name, unit = '개'] = pick(ITEMS);
+    qKey = 'count.q.' + name;
     const min = round < 2 ? 1 : 3, max = round < 2 ? 5 : 10;
     n = min + rnd(max - min + 1);
-    q.textContent = `${name}${josa(name, '가', '이')} 몇 개일까?`;
+    q.textContent = `${name}${josa(name, '가', '이')} 몇 ${unit}일까?`;
     box.innerHTML = '';
     for (let i = 0; i < n; i++) {
       const it = document.createElement('button');
@@ -1118,7 +1172,7 @@ games.count = (() => {
       b.addEventListener('click', () => answer(b, v));
       ans.appendChild(b);
     });
-    say(q.textContent);
+    talk(qKey, q.textContent);
   }
   function tap(it) {
     Snd.tick();
@@ -1131,19 +1185,21 @@ games.count = (() => {
       if (!b) { b = document.createElement('span'); b.className = 'num'; x.appendChild(b); }
       b.textContent = k + 1;
     });
-    if (i < 0) say(String(tapped.length));
+    if (i < 0) talk('num.' + tapped.length, String(tapped.length));
   }
   function answer(b, v) {
     if (busy) return;
     if (v === n) {
-      busy = true; b.classList.add('ok'); Snd.ding(); round++; renderDots(); say('딩동댕! 맞았어요');
-      setTimeout(() => { if (round >= ROUNDS) celebrate('count', '숫자를 아주 잘 세었어요!'); else next(); }, 1000);
+      busy = true; b.classList.add('ok'); round++; renderDots();
+      const v = Voice.play('count.ok'); if (!v) { Snd.ding(); say('딩동댕! 맞았어요'); }
+      // 목소리(실로폰+말, 약 2초)가 끝난 뒤 다음 문제
+      setTimeout(() => { if (round >= ROUNDS) celebrate('count', '숫자를 아주 잘 세었어요!'); else next(); }, v ? 2200 : 1000);
     } else {
-      b.classList.add('no'); Snd.buzz(); say('다시 세어 볼까?');
+      b.classList.add('no'); Snd.buzz(); talk('count.no', '다시 세어 볼까?');
     }
   }
   function start() { round = 0; renderDots(); next(); }
-  $('#count-say').addEventListener('click', () => { Snd.tick(); say(q.textContent); });
+  $('#count-say').addEventListener('click', () => { Snd.tick(); talk(qKey, q.textContent); });
   return { start };
 })();
 /* ===== 게임 6 · 점 잇기 ===== */
@@ -1191,7 +1247,7 @@ games.dots = (() => {
   }
   function wrong(i) {
     Snd.buzz(); const g = $(`.dpt[data-i="${i}"]`, box); if (g) { g.classList.add('wrong'); setTimeout(() => g.classList.remove('wrong'), 450); }
-    say(`${next + 1}번을 찾아봐`);
+    talk('dots.find.' + (next + 1), `${next + 1}번을 찾아봐`);
   }
   function mark() {
     $$('.dpt', box).forEach((g, i) => { g.classList.toggle('done', i < next); g.classList.toggle('next', i === next); });
@@ -1199,15 +1255,17 @@ games.dots = (() => {
   }
   function tap(i) {
     if (i !== next) return wrong(i);
-    Snd.star(Math.min(next, 6)); say(String(i + 1));
+    Snd.star(Math.min(next, 6));
+    if (next + 1 < order.length) talk('num.' + (i + 1), String(i + 1));   // 마지막 점은 '우와! ○○이 됐다!'가 대신
     next++;
     const pts = order.slice(0, next).map(p => p.join(',')); if (next === order.length) pts.push(order[0].join(','));
     $('#dline').setAttribute('points', pts.join(' '));
     mark();
     if (next === order.length) {
       const f = $('#dfill'); f.setAttribute('fill', pick(COLORS)); f.style.opacity = .85;
-      const em = $('#demo'); em.setAttribute('opacity', '1'); Snd.ding(); round++; renderDots();
-      setTimeout(() => { if (round >= ROUNDS) celebrate('dots', '점을 이어서 그림을 완성했어요!'); else startRound(); }, 1400);
+      const em = $('#demo'); em.setAttribute('opacity', '1'); round++; renderDots();
+      const v = Voice.play('dots.done.' + shape.n); if (!v) Snd.ding();
+      setTimeout(() => { if (round >= ROUNDS) celebrate('dots', '점을 이어서 그림을 완성했어요!'); else startRound(); }, v ? 2400 : 1400);
     }
   }
   function start() { round = 0; renderDots(); startRound(); }
@@ -1247,7 +1305,7 @@ games.scene = (() => {
   $('#scene-undo').addEventListener('click', () => { if (stickers.length) { stickers.pop(); Snd.buzz(); render(); } });
   $('#scene-clear').addEventListener('click', () => { stickers = []; Snd.tick(); render(); });
   $('#scene-done').addEventListener('click', () => {
-    if (stickers.length < 3) { Snd.buzz(); toast('스티커를 3개 이상 붙여 볼까? 🧸'); return; }
+    if (stickers.length < 3) { Snd.buzz(); toast('스티커를 3개 이상 붙여 볼까? 🧸'); Voice.play('scene.more'); return; }
     const svg = svgOf(); Works.add({ id: 'scene', n: BG[bg].n + ' 꾸미기', kind: 'scene', svg, t: Date.now() });
     celebrate('scene', '멋진 장면을 꾸몄어요! 내 그림에 저장했어요.', svg + '<small>내가 꾸민 장면</small>');
     stickers = []; bg = rnd(BG.length);
@@ -1277,9 +1335,9 @@ games.xylo = (() => {
   function tap(i) { play(i); flash(i); if (song && !playing) { if (i === seq[pos]) { pos++; if (pos >= seq.length) { song = null; mark(); hint.textContent = '🎉 노래를 다 쳤어요!'; setTimeout(() => celebrate('xylo', '실로폰으로 노래를 완성했어요!'), 600); return; } mark(); } } }
   function mark() { [...bars.children].forEach((b, i) => b.classList.toggle('next', !!song && !playing && seq[pos] === i)); renderSongs(); }
   function renderBars() { bars.innerHTML = ''; NOTES.forEach((n, i) => { const b = document.createElement('button'); b.className = 'bar-key'; b.style.setProperty('--c', n[2]); b.style.setProperty('--h', (100 - i * 7) + '%'); b.innerHTML = `<span>${n[0]}</span>`; b.addEventListener('pointerdown', e => { e.preventDefault(); tap(i); }); bars.appendChild(b); }); }
-  function renderSongs() { songsEl.innerHTML = ''; SONGS.forEach(s => { const b = document.createElement('button'); b.className = 'chip' + (song === s ? ' on' : ''); b.textContent = '🎵 ' + s.n; b.addEventListener('click', () => { Snd.tick(); song = s; seq = s.seq.replace(/\s/g, '').split('').map(Number); pos = 0; playing = false; stopDemo(); hint.textContent = `반짝이는 건반을 순서대로 눌러 봐! (${seq.length}개)`; mark(); }); songsEl.appendChild(b); }); }
+  function renderSongs() { songsEl.innerHTML = ''; SONGS.forEach(s => { const b = document.createElement('button'); b.className = 'chip' + (song === s ? ' on' : ''); b.textContent = '🎵 ' + s.n; b.addEventListener('click', () => { Snd.tick(); song = s; seq = s.seq.replace(/\s/g, '').split('').map(Number); pos = 0; playing = false; stopDemo(); hint.textContent = `반짝이는 건반을 순서대로 눌러 봐! (${seq.length}개)`; mark(); Voice.play('xylo.song'); }); songsEl.appendChild(b); }); }
   function stopDemo() { timers.forEach(clearTimeout); timers = []; playing = false; }
-  $('#xylo-demo').addEventListener('click', () => { if (!song) { toast('먼저 노래를 골라 봐 🎵'); return; } stopDemo(); playing = true; mark(); seq.forEach((n, k) => timers.push(setTimeout(() => { play(n); flash(n); if (k === seq.length - 1) { playing = false; pos = 0; mark(); } }, k * 420))); });
+  $('#xylo-demo').addEventListener('click', () => { if (!song) { toast('먼저 노래를 골라 봐 🎵'); Voice.play('xylo.pick'); return; } stopDemo(); playing = true; mark(); seq.forEach((n, k) => timers.push(setTimeout(() => { play(n); flash(n); if (k === seq.length - 1) { playing = false; pos = 0; mark(); } }, k * 420))); });
   $('#xylo-free').addEventListener('click', () => { Snd.tick(); stopDemo(); song = null; hint.textContent = '마음대로 쳐 봐! 노래를 고르면 따라 칠 수 있어요.'; mark(); });
   function start() { renderBars(); stopDemo(); song = null; pos = 0; hint.textContent = '마음대로 쳐 봐! 노래를 고르면 따라 칠 수 있어요.'; mark(); }
   return { start, stop: stopDemo };
